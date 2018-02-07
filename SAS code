@@ -1,0 +1,265 @@
+/* Forecast1.sas */
+/* Distribution Channel = Denmark */
+
+/* Use proc esm to get the optimal parameter estimates */
+/* Use proc forecast to obtain MAPE and forecasts */
+
+options TopMargin=1in BottomMargin=1in LeftMargin=1in RightMargin=1in 
+orientation=landscape NoDate;
+
+ods EscapeChar="^";
+
+proc format library=work;
+  value monthfmt 1="01: January" 2="02: February" 3="03: March" 4="04: April"
+  5="05: May" 6="06: June" 7="07: July" 08="08: August" 09="09: September"
+  10="10: October" 11="11: November" 12="12: December";
+run;
+
+data _null_;
+  call symput("today_mv",trim(put(today(),WeekDate29.-l)));
+  call symput("td_mv",trim(put(today(),date9.-l)));
+run;
+%put &today_mv;
+
+footnote1 height=10pt "Report generated on &today_mv"; 
+
+proc import out=work.d1 DataFile=
+"I:\Desktop\MyStuff\ConsultingProjects\ExternalProjects\Charbroil
+\Stat forecast file with dictionary 12_21_2017.xlsx" dbms=xlsx replace;
+  sheet="StatForecastFile2 wo cspare";
+  GetNames=yes;
+  attrib _all_ label=" ";
+run;
+
+proc freq data=d1;
+  table location / NoCum;
+run;
+
+data d2;
+  set d1;
+  keep Week ActualSales_DC ActualSales_DI Day Month Year Date LongDate YearMonth MonthYear;
+  if Location=3021; /* Subset to Distribution Channel in Denmark */ 
+  Day=input(SubStr(week,9,2),2.);
+  Month=input(SubStr(week,6,2),2.);
+  Year=input(SubStr(week,1,4),4.);
+  Date=mdy(month,day,year);
+  LongDate=Date;
+  MonthYear=date;
+  format date date9. LongDate WeekDate29. MonthYear MONYY7.;
+  YearMonth=SubStr(week,1,4)||"_"||SubStr(week,6,2);
+run;
+
+proc sort data=d2 out=d3;
+  by date;
+run;
+
+proc means NoPrint data=d3;
+  by year month YearMonth MonthYear;
+  output out=d4 sum(ActualSales_DC)=TotalSales sum(ActualSales_DI)=TotalSalesDI;
+run;
+
+data d4;
+  set d4;
+  format TotalSales TotalSalesDI comma12.;
+  drop _type_;
+run;
+
+title1 "Charbroil Sales Forecasting Project";
+
+ods rtf file=
+"I:\Desktop\MyStuff\ConsultingProjects\ExternalProjects\Charbroil\Denmark_&td_mv..rtf"
+style=phil nogfootnote;
+
+ods rtf text="^n For purposes of forecasting, the sales data has been separated in
+ two sets, by distribution channel: Location=3021 (Denmark) and Location=3022 
+ (Netherlands). Only the sales from a distribution channel in Europe have been used, that 
+ is, the units sold in the variable ActualSales_DC. The data has been aggregated (by 
+ summing) to the month level, so for each of the two distribution channels we have 42 
+ months worth of data, from January 2014 to June 2017 (the data after June 2017 is 
+ incomplete and therefore excluded). These are the first 10 rows of the Denmark 
+ aggregated dataset:^n";
+
+ods rtf StartPage=no;
+
+proc print data=d4 (obs=10);
+  var MonthYear TotalSales;
+run;
+
+ods graphics / width=6in;
+
+data d5;
+  set d4;
+  where YearMonth<="2017_06";
+  format month monthfmt.;
+run;
+
+proc sgplot data=d5;
+  title1 "Charbroil Forecasting Project";
+  title2 "Observed ActualSales_DC by month for DC=3021 (Denmark)";
+  series x=MonthYear y=TotalSales 
+/ LineAttrs=(color=LightGrey) markers MarkerAttrs=(symbol=CircleFilled size=6pt color=grey) 
+  DataSkin=sheen;
+  xAxis ValuesRotate=vertical ValueAttrs=(size=8pt);
+  yAxis values=(0 to 125000 by 25000);
+  label MonthYear="Month" TotalSales="Total Sales";
+run;
+
+* ods graphics / reset=width;
+
+ods rtf text="^n This time series exhibits clear seasonality (similar monthly pattern
+ repeated over the years), and a slight upward trend. Therefore, we choose a forecasting
+ model that can accomodate both trend and seasonality: Peter Winters' 3-parameter 
+ exponential-smoothing forecasting model. Because we see that the seasonal cycle appears 
+ to be amplified over the years, we choose the multiplicative version of Winters' model.";
+
+proc sort data=d5 out=d5s;
+  by month year;
+run;
+
+proc means NoPrint data=d5s;
+  by month;
+  output out=d5_means (drop=_type_) mean(TotalSales)=MonthlyMeanSales;
+run;
+
+proc means NoPrint data=d5_means;
+  var MonthlyMeanSales;
+  output out=d5_grand_mean;
+run;
+
+data _null_;
+  set d5_grand_mean;
+  if _stat_="MEAN" then call symput("gm_mv",put(MonthlyMeanSales,12.-l));
+run;
+%put &gm_mv;
+
+proc sgplot data=d5_means;
+  title1 "Charbroil Forecasting Project";
+  title2 "Average monthly sales for DC=3021 (Denmark)";
+  RefLine &gm_mv / axis=y label="Grand mean = %SysFunc(putn(&gm_mv,comma12.-l))" 
+  LabelLoc=inside;
+  vbar Month / response=MonthlyMeanSales;
+  yaxis values=(0 to 100000 by 10000) label="Sales";
+  xaxis ValuesRotate=vertical;
+run;
+
+ods rtf text="^n We can plot the average sales by month, and see that seasonality
+ is a substantial source of variation in sales.";
+
+proc esm data=d5 plot=Forecasts lead=6
+  out=d5ESMout OutEst=Est OutFor=For OutStat=Stat print=(estimates summary statistics);
+  id MonthYear interval=Month accumulate=total;
+  forecast TotalSales / model=MultWinters;
+  ods exclude all;
+run;
+
+data _null_;
+  set est;
+  if _parm_="LEVEL" then call symput("level_mv",put(_est_,12.6));
+  if _parm_="TREND" then call symput("trend_mv",put(_est_,12.6));
+  if _parm_="SEASON" then call symput("season_mv",put(_est_,12.6));
+run;
+%put &level_mv &trend_mv &season_mv;
+
+ods exclude none;
+
+proc forecast data=d5
+  interval=Month lead=6 OutActual OutLimits OutAll out=pred_f OutEst=est_f
+  OutFitStats method=winters seasons=12 trend=1 weight=(&level_mv,&trend_mv,&season_mv);
+  id MonthYear;
+  var TotalSales;
+run;
+
+data _null_;
+  set est_f;
+  if _type_="MAPE" then call symput("mape_mv",trim(put(TotalSales,10.2-l)));
+run;
+%put &mape_mv;
+
+proc transpose data=pred_f out=pred_f_t (drop=_name_);
+  by MonthYear;
+  var TotalSales;
+  id _type_;
+run;
+
+data pred_f_t2;
+  set pred_f_t;
+  row=_n_;
+  if row<=42 then MonthYear1=MonthYear; else MonthYear1=.;
+  if row>42 then MonthYear2=MonthYear; else MonthYear2=.;
+  format MonthYear1-MonthYear2 MONYY7.;
+  if .<L95<0 then L95=0;
+run;
+
+proc sgplot data=pred_f_t2;
+  title1 "Charbroil Forecasting Project";
+  title2 "Observed Sales and Forecasts for 6 months ahead for DC=3021 (Denmark)";
+  series x=MonthYear1 y=actual 
+/ LineAttrs=(color=LightGrey) markers MarkerAttrs=(symbol=CircleFilled size=6pt 
+  color=grey) DataSkin=sheen;
+  band x=monthyear2 lower=l95 upper=u95 / FillAttrs=(color=vligb transparency=0.5);
+  series x=MonthYear2 y=forecast
+/ LineAttrs=(color=DarkBlue) markers MarkerAttrs=(symbol=CircleFilled size=6pt 
+  color=blue) DataSkin=sheen;
+  xAxis ValuesRotate=vertical ValueAttrs=(size=8pt);
+  yAxis values=(0 to 125000 by 25000);
+  label MonthYear="Month" actual="Total Sales";
+  RefLine '18JUN2017'd / axis=x LineAttrs=(color=black);
+run;
+
+ods rtf text="^n This is how we anticipate the time series to continue for
+ 6 months beyond the observed data. The forecasts are in blue, with the confidence
+ interval (aka confidence band).";
+
+proc sgplot data=pred_f_t2 NoAutoLegend;
+  title1 "Charbroil Forecasting Project";
+  title2 "Forecast for DC=3021 (Denmark)";
+  where monthyear>'18JUN2017'd;
+  band x=monthyear2 lower=l95 upper=u95 / FillAttrs=(color=vligb transparency=0.5);
+  series x=MonthYear2 y=forecast
+/ LineAttrs=(color=DarkBlue) markers MarkerAttrs=(symbol=CircleFilled size=6pt 
+  color=blue) DataSkin=sheen;
+  xAxis ValuesRotate=vertical ValueAttrs=(size=8pt) 
+  values=('1jul2017'd to '1dec2017'd by month);
+  yAxis values=(0 to 150000 by 25000);
+  label MonthYear2="Month";
+  XaxisTable forecast;
+run;
+
+ods rtf text="^n As we focus on the forecasting time period, we can see more closely 
+ the forecasted values for each of the 6 months.";
+
+ods rtf StartPage=now;
+
+proc print NoObs label data=est_f;
+  where _type_ in ("WEIGHT1","WEIGHT2","WEIGHT3","MAPE");
+  var _type_ TotalSales;
+  label _type_="Parameter" TotalSales="Value";
+run;
+
+ods rtf text="^n These are our optimized values for the 3 parameters of the forecasting
+ model. Respectively, they are Level (^{unicode alpha}: alpha), 
+ Trend (^{unicode beta}: beta), and Season (^{unicode gamma}: gamma). The
+ resulting measure of forecasting error MAPE (Mean Absolute Percent Error) takes
+ on this value of &mape_mv..";
+
+ods rtf StartPage=now;
+
+proc print NoObs data=pred_f_t2;
+  where row>42;
+  var MonthYear l95 forecast u95;
+  label MonthYear="Month Year";
+run;
+
+ods rtf text="^n The table above shows the forecasts, along with the 95% confidence 
+ interval (lower limit: L95, upper limit: U95).";
+
+title;
+
+ods rtf close;
+
+/*
+
+proc export data=work.d5 dbms=xlsx OutFile=
+"I:\Desktop\MyStuff\ConsultingProjects\ExternalProjects\Charbroil\d5.xlsx" 
+replace;
+run;
